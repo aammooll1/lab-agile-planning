@@ -1,0 +1,55 @@
+================================================================================
+ Workflow Expression Robot snippet
+ Change-Release Parent/Child Business Rule
+================================================================================
+
+WHERE TO PUT THIS
+-----------------
+In the Workflow Template Administrator, on your Change Notice (ECN) release
+process, add an "Expression Robot" on the activity that performs/approves the
+release (typically just before the transition that moves the change and its
+resulting objects to RELEASED).
+
+The workflow variable `primaryBusinessObject` is the change object that the
+process is acting on. Cast it to WTChangeOrder2.
+
+OPTION A - HARD STOP (recommended)
+----------------------------------
+Fail the activity (and therefore block the release) when violations exist. The
+exception message is shown to the user as the reason the robot failed.
+
+    import wt.change2.WTChangeOrder2;
+    import ext.windchill.change.rules.ChangeReleaseChildParentRule;
+
+    WTChangeOrder2 changeOrder = (WTChangeOrder2) primaryBusinessObject;
+    new ChangeReleaseChildParentRule().validate(changeOrder);
+
+    // If validate() returns without throwing, the change is safe to release.
+
+
+OPTION B - ROUTING (set a boolean and branch in the workflow)
+-------------------------------------------------------------
+Instead of failing, compute a flag the workflow can route on (e.g. send the
+change back for rework when children are not released).
+
+    import java.util.List;
+    import wt.change2.WTChangeOrder2;
+    import ext.windchill.change.rules.ChangeReleaseChildParentRule;
+
+    WTChangeOrder2 changeOrder = (WTChangeOrder2) primaryBusinessObject;
+    List violations = new ChangeReleaseChildParentRule().findViolations(changeOrder);
+
+    // 'childrenReleased' must be declared as a workflow process variable
+    // (java.lang.Boolean). Use it to drive the routing condition on the
+    // outgoing links of this robot.
+    childrenReleased = Boolean.valueOf(violations.isEmpty());
+
+    // Optionally surface the detail on a String process variable:
+    // releaseRuleMessage = violations.toString();
+
+NOTE
+----
+Make sure the customization jar containing ext.windchill.change.rules.* is on
+the Windchill methodserver classpath (codebase/WEB-INF/lib or your site jar) so
+the workflow compiler can resolve the imports.
+================================================================================

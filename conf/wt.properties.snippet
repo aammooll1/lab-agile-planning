@@ -1,0 +1,14 @@
+# ============================================================================
+# Optional wt.properties registration for the event-driven variant of the
+# change-release parent/child rule.
+#
+# Apply with xconfmanager, e.g.:
+#   xconfmanager -s \
+#     "wt.services.service.ext.windchill.change.rules.ChangeReleaseRuleListener/ext.windchill.change.rules.ChangeReleaseRuleListener=ext.windchill.change.rules.ChangeReleaseRuleListener/duplicate" \
+#     -t codebase/wt.properties -p
+#
+# You do NOT need this if you only use the workflow expression robot
+# (see workflow/ChangeReleaseChildParentExpressionRobot.txt).
+# ============================================================================
+
+wt.services.service.ext.windchill.change.rules.ChangeReleaseRuleListener/ext.windchill.change.rules.ChangeReleaseRuleListener=ext.windchill.change.rules.ChangeReleaseRuleListener/duplicate
