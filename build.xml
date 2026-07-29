@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ant build for the Windchill Part Loader utility.
+
+  Ant rather than Maven on purpose. Windchill's jars are not published to any public
+  repository, so a Maven build needs every jar installed into a local repository or an
+  internal Nexus, which is real work to set up and to keep aligned with each service pack.
+  Ant compiling straight against $WT_HOME/codebase/WEB-INF/lib is what PTC's own build
+  does and it stays correct automatically when the installation is patched.
+
+  Usage:
+    ant -Dwt.home=/opt/ptc/Windchill compile
+    ant -Dwt.home=/opt/ptc/Windchill deploy
+-->
+<project name="windchill-part-loader" default="compile" basedir=".">
+
+    <property environment="env"/>
+    <property name="wt.home" value="${env.WT_HOME}"/>
+    <property name="src.dir" value="src/main/java"/>
+    <property name="build.dir" value="build/classes"/>
+    <property name="dist.dir" value="dist"/>
+    <property name="jar.name" value="part-loader.jar"/>
+
+    <!-- Windchill 12.1 runs on Java 11. Compiling to a newer bytecode level than the
+         method server's JVM produces UnsupportedClassVersionError only at runtime, in
+         production, which is the worst possible place to discover it. -->
+    <property name="java.source" value="11"/>
+    <property name="java.target" value="11"/>
+
+    <path id="windchill.classpath">
+        <pathelement location="${wt.home}/codebase"/>
+        <fileset dir="${wt.home}/codebase/WEB-INF/lib">
+            <include name="**/*.jar"/>
+        </fileset>
+        <fileset dir="${wt.home}/srclib">
+            <include name="**/*.jar"/>
+        </fileset>
+    </path>
+
+    <target name="check-env">
+        <fail message="wt.home is not set. Run: ant -Dwt.home=/path/to/Windchill compile">
+            <condition>
+                <or>
+                    <equals arg1="${wt.home}" arg2=""/>
+                    <not><available file="${wt.home}/codebase" type="dir"/></not>
+                </or>
+            </condition>
+        </fail>
+        <echo message="Building against Windchill at ${wt.home}"/>
+    </target>
+
+    <target name="clean">
+        <delete dir="${build.dir}"/>
+        <delete dir="${dist.dir}"/>
+    </target>
+
+    <target name="compile" depends="check-env">
+        <mkdir dir="${build.dir}"/>
+        <javac srcdir="${src.dir}"
+               destdir="${build.dir}"
+               source="${java.source}"
+               target="${java.target}"
+               includeantruntime="false"
+               debug="true"
+               debuglevel="lines,vars,source"
+               encoding="UTF-8">
+            <classpath refid="windchill.classpath"/>
+            <compilerarg value="-Xlint:deprecation"/>
+        </javac>
+    </target>
+
+    <target name="jar" depends="compile">
+        <mkdir dir="${dist.dir}"/>
+        <jar destfile="${dist.dir}/${jar.name}" basedir="${build.dir}">
+            <manifest>
+                <attribute name="Implementation-Title" value="Windchill Part Loader"/>
+                <attribute name="Built-Against-Windchill" value="${wt.home}"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <!--
+      Input-layer smoke test. Runs with nothing but a JDK - no Windchill installation, no
+      database, no method server - because it compiles only the classes that have no wt.*
+      imports. That is the whole point: whoever prepares the load file can validate the
+      parsing and defaulting rules without waiting for a DEV environment.
+
+        ant test
+
+      Everything below the mapper needs a real instance and is covered by --dry-run instead.
+    -->
+    <target name="test">
+        <mkdir dir="build/test"/>
+        <javac destdir="build/test" source="${java.source}" target="${java.target}"
+               includeantruntime="false" encoding="UTF-8" debug="true">
+            <src path="${src.dir}"/>
+            <src path="src/test/java"/>
+            <include name="com/plm/tools/partloader/LoaderConfig.java"/>
+            <include name="com/plm/tools/partloader/util/**"/>
+            <include name="com/plm/tools/partloader/model/**"/>
+            <include name="com/plm/tools/partloader/io/**"/>
+            <include name="com/plm/tools/partloader/ParserSmokeTest.java"/>
+        </javac>
+        <java classname="com.plm.tools.partloader.ParserSmokeTest"
+              classpath="build/test" failonerror="true" fork="true">
+            <arg value="samples/parts_sample.csv"/>
+            <arg value="samples/bom_sample.csv"/>
+        </java>
+    </target>
+
+    <!--
+      Deploys loose class files into the codebase rather than a jar in WEB-INF/lib.
+
+      Both work. Loose classes under $WT_HOME/codebase are the lower-risk option for a
+      utility like this: they are picked up without touching the servlet container's
+      library set, they are trivially diffable during an audit, and removing the
+      customisation is a directory delete. A jar in WEB-INF/lib changes the classpath that
+      every other Windchill module also loads from.
+
+      A method server restart is required either way — Windchill does not hot-reload
+      server-side classes.
+    -->
+    <target name="deploy" depends="compile">
+        <copy todir="${wt.home}/codebase">
+            <fileset dir="${build.dir}">
+                <include name="com/plm/tools/partloader/**/*.class"/>
+            </fileset>
+        </copy>
+        <echo message="Deployed to ${wt.home}/codebase - RESTART the method server before running."/>
+    </target>
+
+</project>

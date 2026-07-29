@@ -1,0 +1,6 @@
+parentNumber,parentView,childNumber,quantity,defaultUnit
+BRK-100000,Design,BRK-100001,1,ea
+BRK-100000,Design,BRK-100002,2,ea
+BRK-100000,Design,FST-200001,4,ea
+BRK-100000,Design,FST-200002,4,ea
+BRK-100000,Design,SEA-300001,0.85,m

@@ -1,0 +1,7 @@
+number,name,containerType,containerName,folderPath,view,softType,partType,source,defaultUnit,traceCode,IBA:MaterialGrade,IBA:SurfaceTreatment,IBA:CustomerPartNumber
+BRK-100000,Front Bracket Assembly,PRODUCT,Headlamp Program X,/Default/Parts/Assemblies,Design,,separable,make,ea,untraced,,,
+BRK-100001,Bracket Body,PRODUCT,Headlamp Program X,/Default/Parts/Components,Design,,component,make,ea,untraced,EN AW-6082 T6,Anodised 15um,
+BRK-100002,Reinforcement Plate,PRODUCT,Headlamp Program X,/Default/Parts/Components,Design,,component,make,ea,untraced,DC04,Zinc plated,
+FST-200001,Hex Bolt M6x20,LIBRARY,Standard Parts Library,/Default/Fasteners,Design,,component,buy,ea,untraced,8.8 Steel,Zinc plated,
+FST-200002,Washer M6,LIBRARY,Standard Parts Library,/Default/Fasteners,Design,,component,buy,ea,untraced,A2 Stainless,,
+SEA-300001,"Gasket, Perimeter Seal",PRODUCT,Headlamp Program X,/Default/Parts/Components,Design,,component,buy,m,lot,EPDM 70 Shore,,CUST-99213

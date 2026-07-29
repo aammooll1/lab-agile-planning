@@ -1,0 +1,11 @@
+build/
+dist/
+*.class
+*.jar
+
+# Load files and run reports never belong in version control: they contain live business
+# data, and a report is an audit artefact that must be archived alongside its input, not
+# committed alongside the code that produced it.
+loadFiles/
+reports/
+*.csv.out
