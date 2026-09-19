@@ -1,186 +1,184 @@
 =====================================================================
  WORKFLOW EXPRESSION -- Change Activity
- Set all RESULTING objects to "Under Review" (if that state is available)
+ Set all RESULTING objects to "Under Review", and surface the ones
+ that cannot get there.
 =====================================================================
 
-WHERE THIS GOES
----------------
-Workflow Template Editor -> open the Change Activity workflow template
-  -> the Activity (or the Robot) you want this to run in
-  -> right-click -> Properties -> Expressions tab
-  -> "Start"  (runs when the node is reached)
-     or
-     "Complete" (runs when the node finishes)
+READ THIS FIRST: WHERE ERRORS ACTUALLY APPEAR
+---------------------------------------------
+A workflow expression runs in the Method Server workflow thread. Most of the
+time there is NO browser session attached to it. Throwing an exception does
+not produce a popup unless the expression happens to be running inside the
+user's own synchronous thread.
 
-Choose "Complete" on the Review/Submit activity if you want the parts to go
-Under Review only after the submitter actually completes their task.
+  Expression location                          Thrown error shows up as
+  -------------------------------------------- --------------------------------
+  Complete expression of a TASK node, when a    Red error banner in the user's
+  user completes it from their Assignments      browser. The task stays open.
+  -------------------------------------------- --------------------------------
+  Robot node, Start expression, timer or        NOTHING in the browser. The
+  transition fired with no user present         process goes into an exception
+                                                state, visible in
+                                                Process Administration, plus the
+                                                process exception notification.
+  -------------------------------------------- --------------------------------
 
-The variable "primaryBusinessObject" is supplied by the workflow engine and
-holds the WTChangeActivity2.
+So: use OPTION 2 if a user is completing a task. Use OPTION 3 if the node is
+asynchronous -- it routes the failure to a task somebody can actually see.
+
+
+WHERE THE EXPRESSION GOES
+-------------------------
+Workflow Template Editor -> Change Activity workflow template
+  -> the Activity (or Robot) node
+  -> right-click -> Properties -> Expressions tab -> Start / Complete
+
+"primaryBusinessObject" is supplied by the engine and holds the WTChangeActivity2.
 
 
 ---------------------------------------------------------------------
- OPTION A -- RECOMMENDED. One line. Logic lives in a real, compiled,
- version-controlled class (windchill/src/ext/change/ChangeActivityStateUtil.java)
+ OPTION 1 -- SILENT. Promote what you can, log the rest, never block.
 ---------------------------------------------------------------------
 
 ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject);
 
 
-If you want the count in a workflow variable (declare an Integer process
-variable named promotedCount first):
+---------------------------------------------------------------------
+ OPTION 2 -- LOUD. Throw so the user sees a red banner.
+ Put this on the COMPLETE expression of the task the user completes.
+---------------------------------------------------------------------
 
-promotedCount = new Integer(
-    ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject));
+ext.change.ChangeActivityStateUtil.promoteResultingObjectsOrFail(primaryBusinessObject);
 
 
-To target a different state, pass the INTERNAL name (not the display name):
+What the user sees (example):
 
-ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject, "UNDERREVIEW");
+    Change Activity CA-000123: 2 resulting object(s) could not be set to
+    the "UNDERREVIEW" state.
+
+      - 0000000456, A.1 : the "UNDERREVIEW" state is not available in the
+        life cycle of this object
+      - 0000000789, B.2 : the object is checked out and cannot change state
+
+    Correct the objects listed above, then complete this task again.
+
+The throw is a wt.util.WTRuntimeException -- UNCHECKED on purpose. The
+expression box compiles your code into a generated method, and an unchecked
+exception needs no throws clause, so this compiles wherever you paste it.
+
+Objects that CAN be promoted still are, before the throw. The sweep is
+best-effort; the exception only reports what was left behind.
 
 
 ---------------------------------------------------------------------
- OPTION B -- Self-contained. Paste directly into the expression box,
- nothing to compile or deploy. Harder to debug, not version controlled.
- The expression editor does not accept "import" statements, so every
- class below is fully qualified.
+ OPTION 3 -- ROUTABLE. The correct design for a robot / async node.
+ Capture the failure text, then branch the workflow on it.
 ---------------------------------------------------------------------
 
-// --- begin expression ---
-org.apache.log4j.Logger logger =
-    wt.log4j.LogR.getLogger("ext.change.SetResultingObjectsUnderReview");
+Step 1. In the workflow template, add a process variable:
+            Name: failureReport      Type: java.lang.String
 
-String TARGET_STATE = "UNDERREVIEW";
+Step 2. Expression on the promotion node:
 
-if (!(primaryBusinessObject instanceof wt.change2.WTChangeActivity2)) {
-    logger.warn("PBO is not a WTChangeActivity2 - nothing to promote.");
-} else {
-    wt.change2.WTChangeActivity2 changeActivity =
-        (wt.change2.WTChangeActivity2) primaryBusinessObject;
+failureReport = ext.change.ChangeActivityStateUtil.promoteAndReport(primaryBusinessObject);
 
-    // Level 1 availability check: does this installation define the state at all?
-    wt.lifecycle.State target = null;
-    try {
-        target = wt.lifecycle.State.toState(TARGET_STATE);
-    } catch (Exception e) {
-        logger.warn("State '" + TARGET_STATE + "' is not defined in this system.");
-    }
+        Returns "" when everything worked, otherwise the same multi-line text
+        shown under Option 2.
 
-    if (target != null) {
-        int promoted = 0;
-        int skipped  = 0;
+Step 3. Add a Conditional / Decision node straight after it, routing on:
 
-        // The workflow user usually does not own the resulting parts.
-        boolean enforced = wt.session.SessionServerHelper.manager.setAccessEnforced(false);
-        try {
-            wt.fc.QueryResult results =
-                wt.change2.ChangeHelper2.service.getChangeablesAfter(changeActivity);
+failureReport.length() > 0
 
-            while (results != null && results.hasMoreElements()) {
-                Object element = results.nextElement();
+        TRUE  -> an assigned task, e.g. "Fix resulting objects", routed back to
+                 the change originator or the Change Administrator.
+        FALSE -> continue the normal happy path.
 
-                if (!(element instanceof wt.lifecycle.LifeCycleManaged)) {
-                    skipped++;
-                    continue;
-                }
-
-                wt.lifecycle.LifeCycleManaged lcObject =
-                    (wt.lifecycle.LifeCycleManaged) element;
-
-                // Already there? Do not churn the iteration history.
-                wt.lifecycle.State current = lcObject.getLifeCycleState();
-                if (current != null && current.equals(target)) {
-                    skipped++;
-                    continue;
-                }
-
-                // A checked-out object cannot change state.
-                if (lcObject instanceof wt.vc.wip.Workable
-                        && wt.vc.wip.WorkInProgressHelper.isCheckedOut(
-                               (wt.vc.wip.Workable) lcObject)) {
-                    logger.warn("Checked out, skipping: " + lcObject);
-                    skipped++;
-                    continue;
-                }
-
-                // One transaction per object: a lifecycle without an Under Review
-                // phase is skipped, it does not roll back the whole sweep.
-                wt.pom.Transaction tx = new wt.pom.Transaction();
-                try {
-                    tx.start();
-                    wt.lifecycle.LifeCycleManaged fresh =
-                        (wt.lifecycle.LifeCycleManaged)
-                            wt.fc.PersistenceHelper.manager.refresh(lcObject);
-
-                    // Level 2 availability check, by attempt.
-                    wt.lifecycle.LifeCycleHelper.service.setLifeCycleState(fresh, target);
-
-                    tx.commit();
-                    tx = null;
-                    promoted++;
-                } catch (Exception e) {
-                    logger.warn("State '" + TARGET_STATE + "' not available for "
-                                + lcObject + " - skipping. " + e.getMessage());
-                    skipped++;
-                } finally {
-                    if (tx != null) {
-                        tx.rollback();
-                    }
-                }
-            }
-        } catch (Exception e) {
-            logger.error("Could not read resulting objects of " + changeActivity, e);
-        } finally {
-            wt.session.SessionServerHelper.manager.setAccessEnforced(enforced);
-        }
-
-        logger.info("Change Activity " + changeActivity + " -> " + TARGET_STATE
-                    + ": promoted=" + promoted + ", skipped=" + skipped);
-    }
-}
-// --- end expression ---
+Step 4. In that task node, put ${failureReport} into the task Instructions.
+        The user opening the task now sees exactly which objects failed and why,
+        in a place they can act on -- which is what "show me an error on the UI"
+        actually needs to mean for an asynchronous process.
 
 
 ---------------------------------------------------------------------
- BUILD AND DEPLOY (Option A only)
+ HOW A FAILURE IS CLASSIFIED
 ---------------------------------------------------------------------
-1. Copy ChangeActivityStateUtil.java to:
+  Condition                                  Counted as   Reported to user
+  ------------------------------------------ ------------ ----------------
+  Promoted successfully                       promoted     no
+  Already in Under Review                     skipped      no
+  Not lifecycle managed at all                skipped      no  (user cannot fix)
+  Checked out                                 FAILED       yes
+  Lifecycle has no Under Review phase         FAILED       yes
+  State-based access rule / gate vetoed it    FAILED       yes
+  Target state undefined in StateRB           FAILED       yes (config error)
+  Could not read the resulting objects        FAILED       yes
+
+Honest limitation: "lifecycle has no Under Review phase" and "a gate vetoed
+the transition" both arrive as WTPropertyVetoException and cannot be told
+apart reliably from the exception alone. Both are reported with the same
+wording. The Method Server log carries the underlying message if you need to
+tell which one you hit -- grep for
+"ext.change.ChangeActivityStateUtil".
+
+
+---------------------------------------------------------------------
+ MESSAGES ARE LOCALIZABLE
+---------------------------------------------------------------------
+All user-facing text lives in ext/change/changeResource.java as @RBEntry
+annotations, not hardcoded in the logic. Two consequences:
+
+  * Translations are added by adding changeResource_<locale>.java.
+  * A site admin can reword any message WITHOUT a rebuild, via
+    Site -> Utilities -> Resource Customization.
+
+Reminder for when you edit the text: {0}, {1} are MessageFormat placeholders,
+and a literal apostrophe must be doubled ('') or MessageFormat silently stops
+substituting the rest of the line.
+
+
+---------------------------------------------------------------------
+ BUILD AND DEPLOY
+---------------------------------------------------------------------
+1. Copy both files into the Windchill source tree:
        <Windchill>/src/ext/change/ChangeActivityStateUtil.java
+       <Windchill>/src/ext/change/changeResource.java
 
 2. Compile:
        cd <Windchill>
        ant -f bin/tools.xml class -Dclass.includes="ext/change/**"
 
-   Class file lands in <Windchill>/codebase/ext/change/ChangeActivityStateUtil.class
+   Classes land in <Windchill>/codebase/ext/change/
 
-3. Restart the Method Server (or let it pick up the class if hot deploy is on).
+3. Restart the Method Server.
 
-4. Open the workflow template, paste the one-line expression, save,
-   and set the template back to Released.
+4. Open the workflow template, paste the one-line expression, save, and set
+   the template back to Released.
+
+5. Test with a Change Activity that has at least one resulting object on a
+   lifecycle WITHOUT an Under Review phase. If you cannot produce a failure
+   on purpose, you have not tested the error path.
 
 
 ---------------------------------------------------------------------
  THINGS THAT WILL BITE YOU
 ---------------------------------------------------------------------
-* "UNDERREVIEW" is the INTERNAL name. The display name "Under Review" will
-  not resolve. Check yours in: Site -> Utilities -> Enumeration Customization
-  -> wt.lifecycle.StateRB.
+* "UNDERREVIEW" is the INTERNAL name. The display name "Under Review" will not
+  resolve. Check yours in Site -> Utilities -> Enumeration Customization ->
+  wt.lifecycle.StateRB.
 
-* getChangeablesAfter() returns RESULTING objects (the "after" side).
-  getChangeablesBefore() returns AFFECTED objects. Swapping them is the
-  single most common mistake in this expression.
+* getChangeablesAfter() returns RESULTING objects. getChangeablesBefore()
+  returns AFFECTED objects. Swapping them is the most common mistake here.
 
-* If a resulting object's lifecycle template has no Under Review phase, the
-  object is SKIPPED and logged -- the workflow continues. If you would rather
-  the workflow fail loudly, rethrow as a RuntimeException in the catch block.
+* Option 2 on a ROBOT node gives the user nothing and leaves the process in an
+  exception state that somebody has to clear by hand in Process Administration.
+  If the node is not user-completed, use Option 3.
 
-* Per-object transactions mean partial success is possible. If you need
-  all-or-nothing, move the Transaction outside the while loop and delete the
-  inner try/catch -- then any single failure rolls the whole set back.
+* Objects are promoted in their own transactions, so a throw under Option 2
+  does NOT roll back the objects that already succeeded. If you need
+  all-or-nothing, move the Transaction outside the loop in promoteOne() and
+  delete the inner catch -- and accept that one bad object blocks every good one.
 
-* Watch out for a state-change policy rule or a lifecycle "gate" that blocks
-  the transition. That surfaces here as WTPropertyVetoException, which this
-  code treats as "not available".
-
-* Log output goes to the Method Server log. Grep for
-  "ext.change.ChangeActivityStateUtil" or "SetResultingObjectsUnderReview".
+* Better still, catch this before the workflow starts: a validator on the
+  Change Activity submit action can refuse the submission with the same message
+  while the user is still on the page. The workflow expression is the safety
+  net, not the primary control.
