@@ -1,0 +1,186 @@
+=====================================================================
+ WORKFLOW EXPRESSION -- Change Activity
+ Set all RESULTING objects to "Under Review" (if that state is available)
+=====================================================================
+
+WHERE THIS GOES
+---------------
+Workflow Template Editor -> open the Change Activity workflow template
+  -> the Activity (or the Robot) you want this to run in
+  -> right-click -> Properties -> Expressions tab
+  -> "Start"  (runs when the node is reached)
+     or
+     "Complete" (runs when the node finishes)
+
+Choose "Complete" on the Review/Submit activity if you want the parts to go
+Under Review only after the submitter actually completes their task.
+
+The variable "primaryBusinessObject" is supplied by the workflow engine and
+holds the WTChangeActivity2.
+
+
+---------------------------------------------------------------------
+ OPTION A -- RECOMMENDED. One line. Logic lives in a real, compiled,
+ version-controlled class (windchill/src/ext/change/ChangeActivityStateUtil.java)
+---------------------------------------------------------------------
+
+ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject);
+
+
+If you want the count in a workflow variable (declare an Integer process
+variable named promotedCount first):
+
+promotedCount = new Integer(
+    ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject));
+
+
+To target a different state, pass the INTERNAL name (not the display name):
+
+ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject, "UNDERREVIEW");
+
+
+---------------------------------------------------------------------
+ OPTION B -- Self-contained. Paste directly into the expression box,
+ nothing to compile or deploy. Harder to debug, not version controlled.
+ The expression editor does not accept "import" statements, so every
+ class below is fully qualified.
+---------------------------------------------------------------------
+
+// --- begin expression ---
+org.apache.log4j.Logger logger =
+    wt.log4j.LogR.getLogger("ext.change.SetResultingObjectsUnderReview");
+
+String TARGET_STATE = "UNDERREVIEW";
+
+if (!(primaryBusinessObject instanceof wt.change2.WTChangeActivity2)) {
+    logger.warn("PBO is not a WTChangeActivity2 - nothing to promote.");
+} else {
+    wt.change2.WTChangeActivity2 changeActivity =
+        (wt.change2.WTChangeActivity2) primaryBusinessObject;
+
+    // Level 1 availability check: does this installation define the state at all?
+    wt.lifecycle.State target = null;
+    try {
+        target = wt.lifecycle.State.toState(TARGET_STATE);
+    } catch (Exception e) {
+        logger.warn("State '" + TARGET_STATE + "' is not defined in this system.");
+    }
+
+    if (target != null) {
+        int promoted = 0;
+        int skipped  = 0;
+
+        // The workflow user usually does not own the resulting parts.
+        boolean enforced = wt.session.SessionServerHelper.manager.setAccessEnforced(false);
+        try {
+            wt.fc.QueryResult results =
+                wt.change2.ChangeHelper2.service.getChangeablesAfter(changeActivity);
+
+            while (results != null && results.hasMoreElements()) {
+                Object element = results.nextElement();
+
+                if (!(element instanceof wt.lifecycle.LifeCycleManaged)) {
+                    skipped++;
+                    continue;
+                }
+
+                wt.lifecycle.LifeCycleManaged lcObject =
+                    (wt.lifecycle.LifeCycleManaged) element;
+
+                // Already there? Do not churn the iteration history.
+                wt.lifecycle.State current = lcObject.getLifeCycleState();
+                if (current != null && current.equals(target)) {
+                    skipped++;
+                    continue;
+                }
+
+                // A checked-out object cannot change state.
+                if (lcObject instanceof wt.vc.wip.Workable
+                        && wt.vc.wip.WorkInProgressHelper.isCheckedOut(
+                               (wt.vc.wip.Workable) lcObject)) {
+                    logger.warn("Checked out, skipping: " + lcObject);
+                    skipped++;
+                    continue;
+                }
+
+                // One transaction per object: a lifecycle without an Under Review
+                // phase is skipped, it does not roll back the whole sweep.
+                wt.pom.Transaction tx = new wt.pom.Transaction();
+                try {
+                    tx.start();
+                    wt.lifecycle.LifeCycleManaged fresh =
+                        (wt.lifecycle.LifeCycleManaged)
+                            wt.fc.PersistenceHelper.manager.refresh(lcObject);
+
+                    // Level 2 availability check, by attempt.
+                    wt.lifecycle.LifeCycleHelper.service.setLifeCycleState(fresh, target);
+
+                    tx.commit();
+                    tx = null;
+                    promoted++;
+                } catch (Exception e) {
+                    logger.warn("State '" + TARGET_STATE + "' not available for "
+                                + lcObject + " - skipping. " + e.getMessage());
+                    skipped++;
+                } finally {
+                    if (tx != null) {
+                        tx.rollback();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Could not read resulting objects of " + changeActivity, e);
+        } finally {
+            wt.session.SessionServerHelper.manager.setAccessEnforced(enforced);
+        }
+
+        logger.info("Change Activity " + changeActivity + " -> " + TARGET_STATE
+                    + ": promoted=" + promoted + ", skipped=" + skipped);
+    }
+}
+// --- end expression ---
+
+
+---------------------------------------------------------------------
+ BUILD AND DEPLOY (Option A only)
+---------------------------------------------------------------------
+1. Copy ChangeActivityStateUtil.java to:
+       <Windchill>/src/ext/change/ChangeActivityStateUtil.java
+
+2. Compile:
+       cd <Windchill>
+       ant -f bin/tools.xml class -Dclass.includes="ext/change/**"
+
+   Class file lands in <Windchill>/codebase/ext/change/ChangeActivityStateUtil.class
+
+3. Restart the Method Server (or let it pick up the class if hot deploy is on).
+
+4. Open the workflow template, paste the one-line expression, save,
+   and set the template back to Released.
+
+
+---------------------------------------------------------------------
+ THINGS THAT WILL BITE YOU
+---------------------------------------------------------------------
+* "UNDERREVIEW" is the INTERNAL name. The display name "Under Review" will
+  not resolve. Check yours in: Site -> Utilities -> Enumeration Customization
+  -> wt.lifecycle.StateRB.
+
+* getChangeablesAfter() returns RESULTING objects (the "after" side).
+  getChangeablesBefore() returns AFFECTED objects. Swapping them is the
+  single most common mistake in this expression.
+
+* If a resulting object's lifecycle template has no Under Review phase, the
+  object is SKIPPED and logged -- the workflow continues. If you would rather
+  the workflow fail loudly, rethrow as a RuntimeException in the catch block.
+
+* Per-object transactions mean partial success is possible. If you need
+  all-or-nothing, move the Transaction outside the while loop and delete the
+  inner try/catch -- then any single failure rolls the whole set back.
+
+* Watch out for a state-change policy rule or a lifecycle "gate" that blocks
+  the transition. That surfaces here as WTPropertyVetoException, which this
+  code treats as "not available".
+
+* Log output goes to the Method Server log. Grep for
+  "ext.change.ChangeActivityStateUtil" or "SetResultingObjectsUnderReview".
