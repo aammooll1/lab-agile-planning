@@ -1,0 +1,219 @@
+=====================================================================
+ WORKFLOW EXPRESSION -- Change Activity
+ Set the lifecycle STATE CODE on the changeables
+=====================================================================
+
+WHAT "STATE CODE" MEANS
+-----------------------
+Every Windchill lifecycle state has two names:
+
+    Display name   "Under Review"     <- what the user sees in the UI
+    Internal name  UNDERREVIEW        <- what the code must use
+
+The internal name is the state CODE. Passing the display name silently fails:
+State.toState("Under Review") does not resolve and nothing moves.
+
+Where to find yours:
+    Site -> Utilities -> Enumeration Customization -> wt.lifecycle.StateRB
+
+OOTB codes you will meet most often:
+
+    INWORK          In Work
+    UNDERREVIEW     Under Review
+    APPROVED        Approved
+    RELEASED        Released
+    REJECTED        Rejected
+    CANCELLED       Cancelled
+
+Site-specific states added by your admin look like CUST_PENDING_CAB or
+similar -- always confirm in Enumeration Customization, never assume.
+
+
+WHAT "CHANGEABLES" MEANS
+------------------------
+wt.change2.Changeable2 is the interface an object implements to be usable in
+change management -- WTPart, WTDocument and EPMDocument all do. A Change
+Activity holds two sets of them:
+
+    ChangeHelper2.service.getChangeablesBefore(ca)   AFFECTED objects
+    ChangeHelper2.service.getChangeablesAfter(ca)    RESULTING objects
+
+Both return a QueryResult of Changeable2. Swapping them is the single most
+common mistake in this expression.
+
+Being a Changeable2 does not by itself mean an object has a lifecycle. To
+change state you need wt.lifecycle.LifeCycleManaged. In practice the same
+objects implement both, but the cast must still be guarded -- hence the
+instanceof check in the loop below.
+
+
+---------------------------------------------------------------------
+ OPTION A -- RECOMMENDED. One line, state code passed in.
+---------------------------------------------------------------------
+
+ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject, "UNDERREVIEW");
+
+Returns the count moved. The same method serves every node in the template --
+just change the code:
+
+    Submit node    -> "UNDERREVIEW"
+    Approve node   -> "APPROVED"
+    Reject node    -> "INWORK"
+
+Better still, do not hardcode it in the expression at all. Declare a String
+process variable named targetState, set its value per node in the template,
+and use:
+
+ext.change.ChangeActivityStateUtil.promoteResultingObjects(primaryBusinessObject, targetState);
+
+Now the state codes live in the workflow template where a business admin can
+see and change them, instead of buried in compiled Java.
+
+
+---------------------------------------------------------------------
+ OPTION B -- Self-contained. Paste straight into the expression box.
+ Nothing to compile or deploy. The expression editor does not accept
+ import statements, so every class is fully qualified.
+---------------------------------------------------------------------
+
+// --- begin expression ---
+
+// The state CODE (internal name), not the display name.
+String STATE_CODE = "UNDERREVIEW";
+
+org.apache.log4j.Logger logger = wt.log4j.LogR.getLogger("ext.change.SetChangeablesState");
+
+if (primaryBusinessObject instanceof wt.change2.WTChangeActivity2) {
+
+    wt.change2.WTChangeActivity2 changeActivity =
+        (wt.change2.WTChangeActivity2) primaryBusinessObject;
+
+    // Resolve the code into a State enumeration value.
+    // Throws if the code is not defined in wt.lifecycle.StateRB.
+    wt.lifecycle.State target = null;
+    try {
+        target = wt.lifecycle.State.toState(STATE_CODE);
+    } catch (Exception e) {
+        logger.error("State code '" + STATE_CODE + "' is not defined in this system.");
+    }
+
+    if (target != null) {
+
+        int moved = 0;
+
+        // The workflow user rarely owns the changeables, so MODIFY would be denied.
+        boolean enforced = wt.session.SessionServerHelper.manager.setAccessEnforced(false);
+        try {
+            // getChangeablesAfter  = RESULTING objects
+            // getChangeablesBefore = AFFECTED objects
+            wt.fc.QueryResult changeables =
+                wt.change2.ChangeHelper2.service.getChangeablesAfter(changeActivity);
+
+            while (changeables != null && changeables.hasMoreElements()) {
+
+                Object changeable = changeables.nextElement();
+
+                // Changeable2 does not guarantee a lifecycle -- guard the cast.
+                if (!(changeable instanceof wt.lifecycle.LifeCycleManaged)) {
+                    continue;
+                }
+
+                wt.lifecycle.LifeCycleManaged lcObject =
+                    (wt.lifecycle.LifeCycleManaged) changeable;
+
+                // Already there? Do not churn the object for nothing.
+                wt.lifecycle.State current = lcObject.getLifeCycleState();
+                if (current != null && current.equals(target)) {
+                    continue;
+                }
+
+                // A checked out object cannot change state.
+                if (lcObject instanceof wt.vc.wip.Workable
+                        && wt.vc.wip.WorkInProgressHelper.isCheckedOut(
+                               (wt.vc.wip.Workable) lcObject)) {
+                    logger.warn("Checked out, skipping: " + lcObject);
+                    continue;
+                }
+
+                // One transaction per changeable: a refusal on one does not roll
+                // back the ones that already succeeded.
+                wt.pom.Transaction tx = new wt.pom.Transaction();
+                try {
+                    tx.start();
+
+                    // Re-read: the link can hand back a stale copy if something
+                    // earlier in the workflow already touched this object.
+                    wt.lifecycle.LifeCycleManaged fresh =
+                        (wt.lifecycle.LifeCycleManaged)
+                            wt.fc.PersistenceHelper.manager.refresh(lcObject);
+
+                    wt.lifecycle.LifeCycleHelper.service.setLifeCycleState(fresh, target);
+
+                    tx.commit();
+                    tx = null;
+                    moved++;
+
+                } catch (Exception e) {
+                    logger.warn("Could not set " + STATE_CODE + " on " + lcObject
+                                + " : " + e.getMessage());
+                } finally {
+                    if (tx != null) {
+                        tx.rollback();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Could not read changeables of " + changeActivity, e);
+        } finally {
+            wt.session.SessionServerHelper.manager.setAccessEnforced(enforced);
+        }
+
+        logger.info("Change Activity " + changeActivity + " -> " + STATE_CODE
+                    + " : moved " + moved + " changeable(s).");
+    }
+}
+// --- end expression ---
+
+
+---------------------------------------------------------------------
+ TO TARGET THE AFFECTED OBJECTS INSTEAD
+---------------------------------------------------------------------
+Change exactly one word:
+
+    getChangeablesAfter(changeActivity)   ->   getChangeablesBefore(changeActivity)
+
+Think before you do. Affected objects are the ones being changed FROM; moving
+them to Under Review is usually wrong, and on a released part it will be
+refused by the lifecycle anyway.
+
+
+---------------------------------------------------------------------
+ WHY THE LOOP IS SHAPED THE WAY IT IS
+---------------------------------------------------------------------
+QueryResult is a forward-only cursor, not a List. hasMoreElements() /
+nextElement(), one pass, no index, no re-reading. nextElement() returns
+Object, which is why every element needs an instanceof check before the cast.
+That is also why you cannot get a count up front without consuming the
+cursor -- the counter is incremented as you go.
+
+
+---------------------------------------------------------------------
+ QUICK CHECKS BEFORE YOU BLAME THE CODE
+---------------------------------------------------------------------
+* Nothing moved, no errors in the log
+      -> wrong state code, or the changeables are already in that state.
+
+* "State code is not defined in this system"
+      -> the code is not in wt.lifecycle.StateRB. Check the spelling in
+         Enumeration Customization. It is case sensitive.
+
+* Objects moved, but not the ones you expected
+      -> you are on getChangeablesBefore when you meant getChangeablesAfter.
+
+* Log is silent entirely
+      -> the expression never ran. Check you put it on the right node and the
+         right event (Start vs Complete), and that the template is Released.
+
+* Log output goes to the Method Server log. Grep for
+      "ext.change.SetChangeablesState"   (Option B)
+      "ext.change.ChangeActivityStateUtil"   (Option A)

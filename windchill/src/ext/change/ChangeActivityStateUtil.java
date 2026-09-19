@@ -76,6 +76,20 @@ public final class ChangeActivityStateUtil {
         return promote(pbo, UNDER_REVIEW).getPromotedCount();
     }
 
+    /**
+     * Same, but the state code comes from the caller instead of being hardcoded.
+     * This is the overload to use from a workflow expression when the target
+     * state differs per node -- Under Review on submit, Approved on approval --
+     * so one method serves the whole template.
+     *
+     * @param stateCode the INTERNAL state name from wt.lifecycle.StateRB, e.g.
+     *                  "UNDERREVIEW". Not the display name "Under Review".
+     * @return the number of changeables actually moved to that state.
+     */
+    public static int promoteResultingObjects(Object pbo, String stateCode) {
+        return promote(pbo, stateCode).getPromotedCount();
+    }
+
     // -----------------------------------------------------------------------
     // Entry point 2 -- loud
     // -----------------------------------------------------------------------
